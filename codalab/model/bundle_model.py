@@ -739,7 +739,7 @@ class BundleModel(object):
                 'state': State.STARTING,
                 'metadata': {'last_updated': int(time.time())},
             }
-            self.update_bundle(bundle, bundle_update, connection)
+            self.update_bundle(bundle, update=bundle_update, connection=connection)
 
             worker_run_row = {'user_id': user_id, 'worker_id': worker_id, 'run_uuid': bundle.uuid}
             connection.execute(cl_worker_run.insert().values(worker_run_row))
@@ -765,7 +765,7 @@ class BundleModel(object):
                 return False
 
             update_message = {'state': State.STAGED, 'metadata': {'job_handle': None}}
-            self.update_bundle(bundle, update_message, connection)
+            self.update_bundle(bundle, update=update_message, connection=connection)
             connection.execute(
                 cl_worker_run.delete().where(cl_worker_run.c.run_uuid == bundle.uuid)
             )
@@ -791,7 +791,7 @@ class BundleModel(object):
                 'state': State.PREPARING,
                 'metadata': {'started': start_time, 'last_updated': start_time, 'remote': remote},
             }
-            self.update_bundle(bundle, bundle_update, connection)
+            self.update_bundle(bundle, update=bundle_update, connection=connection)
 
         return True
 
@@ -827,7 +827,7 @@ class BundleModel(object):
             metadata_update['docker_image'] = worker_run.docker_image
 
         self.update_bundle(
-            bundle, {'state': worker_run.state, 'metadata': metadata_update}, connection
+            bundle, update={'state': worker_run.state, 'metadata': metadata_update}, connection=connection
         )
 
         return True
@@ -859,7 +859,7 @@ class BundleModel(object):
                 'state': State.WORKER_OFFLINE,
                 'metadata': {'last_updated': int(time.time())},
             }
-            self.update_bundle(bundle, bundle_update, connection)
+            self.update_bundle(bundle, update=bundle_update, connection=connection)
         return True
 
     def transition_bundle_finalizing(self, bundle, user_id, worker_run, connection):
@@ -881,7 +881,7 @@ class BundleModel(object):
 
         bundle_update = {'state': State.FINALIZING, 'metadata': metadata}
 
-        self.update_bundle(bundle, bundle_update, connection)
+        self.update_bundle(bundle, update=bundle_update, connection=connection)
 
         if user_id == self.root_user_id:
             self.increment_user_time_used(bundle.owner_id, getattr(bundle.metadata, 'time', 0))
@@ -908,7 +908,7 @@ class BundleModel(object):
         metadata = {'run_status': 'Finished', 'last_updated': int(time.time())}
 
         with self.engine.begin() as connection:
-            self.update_bundle(bundle, {'state': state, 'metadata': metadata}, connection)
+            self.update_bundle(bundle, update={'state': state, 'metadata': metadata}, connection=connection)
             connection.execute(
                 cl_worker_run.delete().where(cl_worker_run.c.run_uuid == bundle.uuid)
             )
@@ -986,11 +986,15 @@ class BundleModel(object):
             self.do_multirow_insert(connection, cl_bundle_metadata, metadata_values)
             bundle.id = result.lastrowid
 
-    def update_bundle(self, bundle, update, connection=None):
+    def update_bundle(self, bundle, update={}, delete_metadata_keys=[], connection=None):
         """
-        Update a bundle's columns and metadata in the database and in memory.
-        The update is done as a diff: columns that do not appear in the update dict
-        and metadata keys that do not appear in the metadata sub-dict are unaffected.
+        For each (key, value) pair in the update dictionary, add or update pair (key, value). Note that
+        metadata keys not in the update dictionary are not affected in the update operation. Also, delete
+        any metadata entries corresponding to the keys specified in the delete_metadata_keys list.
+        1. The update is done as a diff: columns that do not appear in the update dictionary
+        and metadata keys that do not appear in the metadata sub-dictionary are unaffected.
+        2. The delete is done as a diff on metadata dictionary only:
+            metadata keys that do not appear in the delete_metadata_keys list are unaffected.
 
         This method validates all updates to the bundle, so it is appropriate
         to use this method to update bundles based on user input (eg: cl edit).
@@ -1000,22 +1004,35 @@ class BundleModel(object):
         # Apply the column and metadata updates in memory and validate the result.
         metadata_update = update.pop('metadata', {})
         bundle.update_in_memory(update)
+
         for (key, value) in metadata_update.items():
             bundle.metadata.set_metadata_key(key, value)
+
+        for key in delete_metadata_keys:
+            bundle.metadata.remove_metadata_key(key)
+
+        # Validate the uuid and name of the current bundle
         bundle.validate()
-        # Construct clauses and update lists for updating certain bundle columns.
+        # Construct clauses and update lists for updating or deleting certain bundle columns.
         if update:
             clause = cl_bundle.c.uuid == bundle.uuid
         if metadata_update:
-            metadata_clause = and_(
+            metadata_update_clause = and_(
                 cl_bundle_metadata.c.bundle_uuid == bundle.uuid,
                 cl_bundle_metadata.c.metadata_key.in_(metadata_update),
             )
-            metadata_values = [
-                row_dict
-                for row_dict in bundle.to_dict().pop('metadata')
-                if row_dict['metadata_key'] in metadata_update
-            ]
+            metadata_update_values = (
+                [
+                    row_dict
+                    for row_dict in bundle.to_dict().pop('metadata')
+                    if row_dict['metadata_key'] in metadata_update
+                ]
+            )
+        if delete_metadata_keys:
+            metadata_delete_clause = and_(
+                cl_bundle_metadata.c.bundle_uuid == bundle.uuid,
+                cl_bundle_metadata.c.metadata_key.in_(delete_metadata_keys),
+            )
 
         # Perform the actual updates.
         def do_update(connection):
@@ -1023,8 +1040,11 @@ class BundleModel(object):
                 if update:
                     connection.execute(cl_bundle.update().where(clause).values(update))
                 if metadata_update:
-                    connection.execute(cl_bundle_metadata.delete().where(metadata_clause))
-                    self.do_multirow_insert(connection, cl_bundle_metadata, metadata_values)
+                    connection.execute(cl_bundle_metadata.delete().where(metadata_update_clause))
+                    # Update an existing field or add additional fields to metadata.
+                    self.do_multirow_insert(connection, cl_bundle_metadata, metadata_update_values)
+                if delete_metadata_keys:
+                    connection.execute(cl_bundle_metadata.delete().where(metadata_delete_clause))
             except UnicodeError:
                 raise UsageError("Invalid character detected; use ascii characters only.")
 
