@@ -324,7 +324,7 @@ class BundleManager(object):
         )
 
         # Build a dictionary which maps from uuid to running bundle and bundle_resources
-        running_bundles_info = self._get_running_bundles_info(workers)
+        running_bundles_info = self._get_running_bundles_info(workers, staged_bundles_to_run)
 
         # Dispatch bundles
         for bundle, bundle_resources in staged_bundles_to_run:
@@ -738,15 +738,17 @@ class BundleManager(object):
 
         return staged_bundles_to_run
 
-    def _get_running_bundles_info(self, workers):
+    def _get_running_bundles_info(self, workers, staged_bundles_to_run):
         """
-        Build a nested dictionary to store information (bundle and bundle_resources) of all the valid running bundles.
-        Note that the primary usage of this function is to improve efficiency when calling _compute_bundle_resources,
-        e.g. reusing constants (gpus, cpus, memory) from the returning values of _compute_bundle_resources as they
-        don't change over time.
-        However, be careful when using this function to improve efficiency for returning values like disk and time
-        from _compute_bundle_resources as they do depend on the number of jobs that are running during the time of
-        computation. Accuracy might be affected without considering this factor.
+        Build a nested dictionary to store information (bundle and bundle_resources) including 
+        the current running bundles and staged bundles.
+        Note that the primary usage of this function is to improve efficiency when calling 
+        self._compute_bundle_resources(), e.g. reusing constants (gpus, cpus, memory) from 
+        the returning values of self._compute_bundle_resources() as they don't change over time.
+        However, be careful when using this function to improve efficiency for returning values 
+        like disk and time from self._compute_bundle_resources() as they do depend on the number 
+        of jobs that are running during the time of computation. Accuracy might be affected 
+        without considering this factor.
         :param workers: a WorkerInfoAccessor object containing worker related information e.g. running uuid.
         :return: a nested dictionary structured as follows:
                 {
@@ -757,9 +759,15 @@ class BundleManager(object):
                 }
         """
         # Get uuid of all the running bundles from workers (a WorkerInfoAccessor object)
-        run_uuids = workers._uuid_to_worker.keys()
-        # Get the running bundles that exist in the bundle table
-        running_bundles = self._model.batch_get_bundles(uuid=run_uuids)
+        run_uuids = list(workers._uuid_to_worker.keys())
+        # Get uuid of all the staged bundles that will be dispatched on workers
+        staged_uuids = [bundle.uuid for (bundle, bundle_resources) in staged_bundles_to_run]
+
+        # Get the running bundles (including the potential running bundles: staged bundles) that exist
+        # in the bundle table as well. Including staged bundles here is to avoid overestimating worker resources in
+        # the function self._deduct_worker_resources(). We could potentially be conservative on dispatching jobs to
+        # workers, but this is still better than over assigning jobs.
+        running_bundles = self._model.batch_get_bundles(uuid=run_uuids + staged_uuids)
         # Build a dictionary which maps from uuid to running bundle and bundle_resources
         running_bundles_info = {
             bundle.uuid: {
