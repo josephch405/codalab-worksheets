@@ -361,16 +361,8 @@ class BundleManager(object):
         """
         From each worker, subtract resources used by running bundles. Modifies the list.
         """
-
         for worker in workers_list:
             for uuid in worker['run_uuids']:
-                # Verify if the current bundle exists in both the worker table and the bundle table
-                if uuid not in running_bundles_info:
-                    logger.info(
-                        'Bundle {} exists on worker {} but no longer found in the bundle table. '
-                        'Skipping for resource deduction.'.format(uuid, worker['worker_id'])
-                    )
-                    continue
                 bundle_resources = running_bundles_info[uuid]["bundle_resources"]
                 worker['cpus'] -= bundle_resources.cpus
                 worker['gpus'] -= bundle_resources.gpus
@@ -760,8 +752,11 @@ class BundleManager(object):
         """
         # Get uuid of all the running bundles from workers (a WorkerInfoAccessor object)
         run_uuids = list(workers._uuid_to_worker.keys())
+        staged_bundles_to_run_dict = {
+            bundle.uuid: bundle_resources for (bundle, bundle_resources) in staged_bundles_to_run
+        }
         # Get uuid of all the staged bundles that will be dispatched on workers
-        staged_uuids = [bundle.uuid for (bundle, bundle_resources) in staged_bundles_to_run]
+        staged_uuids = list(staged_bundles_to_run_dict.keys())
 
         # Get the running bundles (including the potential running bundles: staged bundles) that exist
         # in the bundle table as well. Including staged bundles here is to avoid overestimating worker resources in
@@ -772,8 +767,11 @@ class BundleManager(object):
         running_bundles_info = {
             bundle.uuid: {
                 "bundle": bundle,
-                "bundle_resources": self._compute_bundle_resources(bundle),
+                "bundle_resources": self._compute_bundle_resources(bundle)
+                if bundle.uuid in run_uuids
+                else staged_bundles_to_run_dict[bundle.uuid],
             }
             for bundle in running_bundles
         }
+
         return running_bundles_info
